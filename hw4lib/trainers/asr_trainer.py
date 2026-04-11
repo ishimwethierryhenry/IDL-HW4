@@ -9,7 +9,7 @@ from ..utils import create_scheduler, create_optimizer
 from ..model import DecoderOnlyTransformer
 import torchaudio.functional as aF
 import json
-import torchmetrics.text as tmt
+# torchmetrics.text imported locally in _calculate_asr_metrics
 from torch.utils.data import Subset
 import pandas as pd
 
@@ -567,6 +567,8 @@ class ASRTrainer(BaseTrainer):
         Returns:
             Tuple of (word_dist, wer, cer)
         """
+        import torchmetrics.text as tmt
+
         # Initialize metrics
         wer_metric = tmt.WordErrorRate()
         word_edit_metric = tmt.EditDistance(reduction='mean')
