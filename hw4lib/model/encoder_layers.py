@@ -4,65 +4,85 @@ from typing import Tuple, Optional
 from .sublayers import SelfAttentionLayer, FeedForwardLayer
 
 '''
-TODO: Implement this Module.
+Transformer Encoder Layer for HW4P2.
 
-This file contains the encoder layer implementation used in transformer architectures:
+The encoder processes the full speech sequence and does NOT use a causal mask.
+Every position can attend to every other position - this is bidirectional attention,
+which makes sense for speech because we have access to the whole utterance at once.
 
-SelfAttentionEncoderLayer: Used in encoder part of transformers
-- Contains self-attention and feed-forward sublayers
-- Unlike decoder, does not use causal masking (can attend to all positions)
-- Used for tasks like encoding input sequences where bidirectional context is needed
+Compare this to the decoder's SelfAttentionDecoderLayer which uses a causal mask
+to prevent attending to future tokens. The encoder has no such restriction.
 
-The layer follows a Pre-LN (Layer Normalization) architecture where:
-- Layer normalization is applied before each sublayer operation
-- Residual connections wrap around each sublayer
+SelfAttentionEncoderLayer:
+  - self_attn : SelfAttentionLayer (no causal mask passed in forward)
+  - ffn       : FeedForwardLayer
 
-Implementation Steps:
-1. Initialize the required sublayers in __init__:
-   - SelfAttentionLayer for self-attention (no causal mask needed)
-   - FeedForwardLayer for position-wise processing
-
-2. Implement the forward pass to:
-   - Apply sublayers in the correct order
-   - Pass appropriate padding masks (no causal mask needed)
-   - Return both outputs and attention weights
+Attribute names self_attn and ffn are checked by the test suite directly.
 '''
+
 
 class SelfAttentionEncoderLayer(nn.Module):
     '''
-    Pre-LN Encoder Layer with self-attention mechanism.
-    Used in the encoder part of transformer architectures.
+    Pre-LN Encoder Layer.
+
+    Each encoder layer is just:
+        self-attention (bidirectional, no causal mask) -> feedforward
+
+    Both sublayers use pre-norm and residual connections internally,
+    so this class just calls them in sequence and passes through the padding mask.
     '''
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
         '''
-        Initialize the SelfAttentionEncoderLayer. 
         Args:
-            d_model   (int): The dimension of the model.
-            num_heads (int): The number of attention heads.
-            d_ff      (int): The dimension of the feedforward network.
-            dropout (float): The dropout rate.
+            d_model   : model dimension
+            num_heads : number of attention heads
+            d_ff      : inner dimension of the feedforward sublayer
+            dropout   : dropout probability used in both sublayers
         '''
         super().__init__()
-        # TODO: Implement __init__
 
-        # TODO: Initialize the sublayers      
-        raise NotImplementedError # Remove once implemented
+        # bidirectional self-attention sublayer
+        # no causal mask will be applied - the encoder sees the full sequence
+        self.self_attn = SelfAttentionLayer(
+            d_model=d_model,
+            num_heads=num_heads,
+            dropout=dropout
+        )
 
-    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # position-wise feedforward sublayer
+        self.ffn = FeedForwardLayer(
+            d_model=d_model,
+            d_ff=d_ff,
+            dropout=dropout
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         '''
-        Forward pass for the EncoderLayer.
         Args:
-            x (torch.Tensor): The input tensor. shape: (batch_size, seq_len, d_model)   
-            key_padding_mask (torch.Tensor): The padding mask for the input. shape: (batch_size, seq_len)
+            x                : (B, T, d_model) - encoder input (speech embeddings)
+            key_padding_mask : (B, T) bool mask - True means this is a padding position
 
         Returns:
-            x (torch.Tensor): The output tensor. shape: (batch_size, seq_len, d_model)
-            mha_attn_weights (torch.Tensor): The attention weights. shape: (batch_size, seq_len, seq_len)   
+            x            : (B, T, d_model) - encoder output
+            attn_weights : (B, T, T) - self-attention weights
+
+        Note: We do NOT pass an attn_mask (causal mask) here.
+        That is the key difference from the decoder self-attention layer.
+        The encoder is free to look at all positions in both directions.
         '''
-        # TODO: Implement forward: Follow the figure in the writeup
+        # self-attention with padding mask only, no causal restriction
+        # attn_mask=None means "attend everywhere" - that is what we want for the encoder
+        henry_enc_x, thierry_enc_weights = self.self_attn(
+            x=x,
+            key_padding_mask=key_padding_mask,
+            attn_mask=None   # no causal mask for encoder - bidirectional attention
+        )
 
-        # What will be different from decoder self-attention layer?
-        
-        # TODO: Return the output tensor and attention weights
-        raise NotImplementedError # Remove once implemented
+        # feedforward sublayer
+        henry_enc_x = self.ffn(henry_enc_x)
 
+        return henry_enc_x, thierry_enc_weights

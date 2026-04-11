@@ -57,15 +57,17 @@ class ASRTrainer(BaseTrainer):
     def __init__(self, model, tokenizer, config, run_name, config_file, device=None):
         super().__init__(model, tokenizer, config, run_name, config_file, device)
 
-        # TODO: Implement the __init__ method
-        
-        # TODO: Initialize CE loss
-        # How would you set the ignore_index? 
-        # Use value in config to set the label_smoothing argument
-        self.ce_criterion = NotImplementedError
-        
-        # TODO: Initialize CTC loss if needed
-        # You can use the pad token id as the blank index
+        # cross-entropy loss for the decoder predictions
+        # ignore_index=pad_id so we do not compute loss on padding tokens
+        # label_smoothing helps prevent overconfident predictions (regularization)
+        self.ce_criterion = nn.CrossEntropyLoss(
+            ignore_index=self.tokenizer.pad_id,
+            label_smoothing=self.config['loss'].get('label_smoothing', 0.0)
+        )
+
+        # CTC loss for the encoder output (auxiliary training signal)
+        # zero_infinity=True prevents NaN when the CTC alignment is impossible
+        # (can happen with very short speech or very long transcripts)
         self.ctc_criterion = None
         self.ctc_weight = self.config['loss'].get('ctc_weight', 0.0)
         if self.ctc_weight > 0:
@@ -73,8 +75,6 @@ class ASRTrainer(BaseTrainer):
                 blank=self.tokenizer.pad_id,
                 zero_infinity=True
             )
-        
-        raise NotImplementedError # Remove once implemented
 
 
     def _train_epoch(self, dataloader):
@@ -86,9 +86,6 @@ class ASRTrainer(BaseTrainer):
         Returns:
             Tuple[Dict[str, float], Dict[str, torch.Tensor]]: Training metrics and attention weights
         """
-        # TODO: In-fill the _train_epoch method
-        raise NotImplementedError # Remove once implemented
-    
         # Initialize training variables
         self.model.train()
         batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training ASR]")
@@ -102,23 +99,49 @@ class ASRTrainer(BaseTrainer):
         self.optimizer.zero_grad()
 
         for i, batch in enumerate(dataloader):
-            # TODO: Unpack batch and move to device
+            # unpack batch and move everything to GPU
             feats, targets_shifted, targets_golden, feat_lengths, transcript_lengths = batch
+            feats              = feats.to(self.device)
+            targets_shifted    = targets_shifted.to(self.device)
+            targets_golden     = targets_golden.to(self.device)
+            feat_lengths       = feat_lengths.to(self.device)
+            transcript_lengths = transcript_lengths.to(self.device)
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                # TODO: get raw predictions and attention weights and ctc inputs from model
-                seq_out, curr_att, ctc_inputs = NotImplementedError
+                # forward pass through the encoder-decoder model
+                # returns logits (B, T_dec, num_classes), attention dicts, and ctc_inputs
+                seq_out, curr_att, ctc_inputs = self.model(
+                    padded_sources=feats,
+                    padded_targets=targets_shifted,
+                    source_lengths=feat_lengths,
+                    target_lengths=transcript_lengths
+                )
                 
                 # Update running_att with the latest attention weights
                 running_att = curr_att
                 
-                # TODO: Calculate CE loss
-                ce_loss = NotImplementedError
-                
-                
-                # TODO: Calculate CTC loss if needed
+                # CE loss: compare predictions to golden targets
+                # seq_out is (B, T, num_classes), need (B, num_classes, T) for CrossEntropyLoss
+                # targets_golden is (B, T) of token ids
+                ce_loss = self.ce_criterion(
+                    seq_out.permute(0, 2, 1),   # (B, num_classes, T)
+                    targets_golden               # (B, T)
+                )
+
+                # CTC loss if enabled (auxiliary loss on encoder output)
                 if self.ctc_weight > 0:
-                    ctc_loss = NotImplementedError
+                    # ctc_inputs has 'log_probs' (T, B, num_classes) and 'lengths' (B,)
+                    # golden targets for CTC: same text but without SOS/EOS convention issues
+                    # we use targets_golden which has EOS appended - CTC handles this ok
+                    # transcript_lengths here are the full lengths including SOS in shifted,
+                    # but for CTC we need the actual transcript length (without EOS/SOS)
+                    # golden transcript length = shifted length (both same size = len(tokens)+1)
+                    ctc_loss = self.ctc_criterion(
+                        ctc_inputs['log_probs'],          # (T_enc, B, num_classes)
+                        targets_golden,                    # (B, T_dec) - the reference tokens
+                        ctc_inputs['lengths'],            # (B,) - encoder output lengths
+                        transcript_lengths                 # (B,) - transcript lengths
+                    )
                     loss = ce_loss + self.ctc_weight * ctc_loss
                 else:
                     ctc_loss = torch.tensor(0.0)
@@ -135,8 +158,9 @@ class ASRTrainer(BaseTrainer):
             # Normalize loss by accumulation steps
             loss = loss / self.config['training']['gradient_accumulation_steps']
 
-            # TODO: Backpropagate the loss
-            self.scaler = NotImplementedError
+            # scale the loss and backpropagate
+            # GradScaler handles mixed precision gradient scaling
+            self.scaler.scale(loss).backward()
 
             # Only update weights after accumulating enough gradients
             if (i + 1) % self.config['training']['gradient_accumulation_steps'] == 0:
@@ -199,9 +223,37 @@ class ASRTrainer(BaseTrainer):
         Returns:
             Tuple[Dict[str, float], List[Dict[str, Any]]]: Validation metrics and recognition results
         """
-        # TODO: In-fill the _validate_epoch method
-        raise NotImplementedError # Remove once implemented
-        
+        # run recognition on the validation set using greedy decoding
+        # recognize() handles the model.eval() and torch.inference_mode() internally
+        val_recognition_config = {
+            'num_batches': None,    # process all validation batches
+            'beam_width': 1,        # greedy decoding for speed
+            'temperature': 1.0,
+            'repeat_penalty': 1.0,
+            'lm_weight': 0.0,
+            'lm_model': None
+        }
+
+        # run inference and collect results
+        val_results = self.recognize(
+            dataloader=dataloader,
+            recognition_config=val_recognition_config,
+            config_name='greedy_val',
+            max_length=self.text_max_len
+        )
+
+        # extract references and hypotheses from results
+        # recognize() returns list of dicts with 'target' and 'generated' keys
+        henry_refs  = [r['target']    for r in val_results if 'target' in r]
+        henry_hyps  = [r['generated'] for r in val_results if 'target' in r]
+
+        # compute ASR metrics (WER, CER, edit distance)
+        if henry_refs and henry_hyps:
+            val_metrics = self._calculate_asr_metrics(henry_refs, henry_hyps)
+        else:
+            val_metrics = {'word_dist': 0.0, 'wer': 0.0, 'cer': 0.0}
+
+        return val_metrics, val_results
     
     def train(self, train_dataloader, val_dataloader, epochs: int):
         """
@@ -218,11 +270,12 @@ class ASRTrainer(BaseTrainer):
         if self.optimizer is None:
             raise ValueError("Optimizer is not initialized, initialize it first!")
         
-        # TODO: In-fill the train method
-        raise NotImplementedError # Remove once implemented
-
-        # Set max transcript length
-        self.text_max_len = max(val_dataloader.dataset.text_max_len, train_dataloader.dataset.text_max_len)
+        # set max transcript length from the dataloaders
+        # this is used by the sequence generator during inference
+        self.text_max_len = max(
+            val_dataloader.dataset.text_max_len,
+            train_dataloader.dataset.text_max_len
+        )
 
         # Training loop
         best_val_loss = float('inf')
@@ -232,11 +285,11 @@ class ASRTrainer(BaseTrainer):
 
         for epoch in range(self.current_epoch, self.current_epoch + epochs):
 
-            # TODO: Train for one epoch
-            train_metrics, train_attn = NotImplementedError, NotImplementedError
-            
-            # TODO: Validate
-            val_metrics, val_results = NotImplementedError, NotImplementedError
+            # train for one epoch, get metrics and attention weights
+            train_metrics, train_attn = self._train_epoch(train_dataloader)
+
+            # validate using greedy decoding, get CER and recognition results
+            val_metrics, val_results = self._validate_epoch(val_dataloader)
 
             # Step ReduceLROnPlateau scheduler with validation loss
             if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -340,12 +393,9 @@ class ASRTrainer(BaseTrainer):
         """
         if max_length is None and not hasattr(self, 'text_max_len'):
             raise ValueError("text_max_len is not set. Please run training loop first or provide a max_length")
-        
-        # TODO: In-fill the recognize method
-        raise NotImplementedError # Remove once implemented
 
         if recognition_config is None:
-            # Default config (greedy search)
+            # default config: greedy search
             recognition_config = {
                 'num_batches': 5,
                 'beam_width': 1,
@@ -360,87 +410,116 @@ class ASRTrainer(BaseTrainer):
             recognition_config['lm_model'].eval()
             recognition_config['lm_model'].to(self.device)
 
-        # Initialize sequence generator
+        # initialize sequence generator
         generator = SequenceGenerator(
-            score_fn=None,  # Will be set for each batch
+            score_fn=None,   # will be set for each batch below
             tokenizer=self.tokenizer,
             max_length=max_length if max_length is not None else self.text_max_len,
             device=self.device
         )
 
-        # Initialize variables
+        # inference mode
         self.model.eval()
-        batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc=f"[Recognizing ASR] : {config_name}")
+        batch_bar = tqdm(
+            total=len(dataloader),
+            dynamic_ncols=True,
+            leave=False,
+            position=0,
+            desc=f"[Recognizing ASR] : {config_name}"
+        )
         results = []
 
-        # Run inference
         with torch.inference_mode():
             for i, batch in enumerate(dataloader):
-                # TODO: Unpack batch and move to device
-                # TODO: Handle both cases where targets may or may not be None (val set v. test set) 
+                # unpack batch - test-clean has no transcripts so golden may be None
                 feats, _, targets_golden, feat_lengths, _ = batch
-                
-                # TODO: Encode speech features to hidden states
-                encoder_output, pad_mask_src, _, _ = NotImplementedError, NotImplementedError, NotImplementedError, NotImplementedError
-                
-                # Define scoring function for this batch
+                feats        = feats.to(self.device)
+                feat_lengths = feat_lengths.to(self.device)
+
+                # encode speech features to get encoder hidden states
+                # we do not need CTC inputs during inference, just encoder output and mask
+                encoder_output, pad_mask_src, _, _ = self.model.encode(
+                    padded_sources=feats,
+                    source_lengths=feat_lengths
+                )
+
+                # define the scoring function for this batch
+                # it captures encoder_output and pad_mask_src from the enclosing scope
                 def get_score(x):
+                    # get logits for next token from the ASR decoder
                     asr_logits = self.model.score(x, encoder_output, pad_mask_src)
+                    # optional shallow fusion with a language model from HW4P1
                     if recognition_config.get('lm_model') is not None:
                         lm_logits = recognition_config['lm_model'].score(x)
                         return asr_logits + recognition_config['lm_weight'] * lm_logits
                     return asr_logits
-                
-                # Set score function of generator
+
+                # wire the scoring function into the generator
                 generator.score_fn = get_score
 
-                # TODO: Initialize prompts as a batch of SOS tokens
+                # initialize prompts: one SOS token per sequence in the batch
+                # shape (B, 1) - the decoder starts with just SOS and generates from there
                 batch_size = feats.size(0)
-                prompts = NotImplementedError
+                prompts = torch.full(
+                    (batch_size, 1),
+                    fill_value=self.tokenizer.sos_id,
+                    dtype=torch.long,
+                    device=self.device
+                )
 
-                # TODO: Generate sequences
+                # generate sequences using the chosen decoding strategy
                 if recognition_config['beam_width'] > 1:
-                    # TODO: If you have implemented beam search, generate sequences using beam search
-                    seqs, scores = NotImplementedError, NotImplementedError
-                    raise NotImplementedError # Remove if you implemented the beam search method
-                    # Pick best beam
-                    seqs = seqs[:, 0, :]
+                    # beam search (optional but recommended for better CER)
+                    seqs, scores = generator.generate_beam(
+                        x=prompts,
+                        beam_width=recognition_config['beam_width'],
+                        temperature=recognition_config['temperature'],
+                        repeat_penalty=recognition_config['repeat_penalty']
+                    )
+                    # pick the best beam (highest score, already sorted by generate_beam)
+                    seqs   = seqs[:, 0, :]
                     scores = scores[:, 0]
                 else:
-                    # TODO: Generate sequences using greedy search
-                    seqs, scores = NotImplementedError, NotImplementedError
-                    raise NotImplementedError # Remove if you implemented the greedy search method
+                    # greedy decoding: always pick the highest probability token
+                    seqs, scores = generator.generate_greedy(
+                        x=prompts,
+                        temperature=recognition_config['temperature'],
+                        repeat_penalty=recognition_config['repeat_penalty']
+                    )
 
-                # Clean up
+                # clean up GPU tensors before post-processing
                 del feats, feat_lengths, encoder_output, pad_mask_src, prompts
                 torch.cuda.empty_cache()
 
-                # Post process sequences
+                # post-process: strip padding and special tokens from generated sequences
                 post_processed_preds = generator.post_process_sequence(seqs, self.tokenizer)
-                
-                # Store results as a list of dictionaries with target and generated sequences and scores
+
+                # store results as list of dicts
                 if targets_golden is not None:
-                    post_processed_targets = generator.post_process_sequence(targets_golden, self.tokenizer)
+                    post_processed_targets = generator.post_process_sequence(
+                        targets_golden, self.tokenizer
+                    )
                     for j, (pred, target) in enumerate(zip(post_processed_preds, post_processed_targets)):
                         results.append({
-                            'target': self.tokenizer.decode(target.tolist(), skip_special_tokens=True),
-                            'generated': self.tokenizer.decode(pred.tolist(), skip_special_tokens=True),
-                            'score': scores[j].item()
+                            'target':    self.tokenizer.decode(target.tolist(), skip_special_tokens=True),
+                            'generated': self.tokenizer.decode(pred.tolist(),   skip_special_tokens=True),
+                            'score':     scores[j].item()
                         })
                 else:
                     for j, pred in enumerate(post_processed_preds):
                         results.append({
                             'generated': self.tokenizer.decode(pred.tolist(), skip_special_tokens=True),
-                            'score': scores[j].item()
+                            'score':     scores[j].item()
                         })
 
                 batch_bar.update()
 
+                # optionally limit to num_batches (used during validation to save time)
                 if recognition_config['num_batches'] is not None and i >= recognition_config['num_batches'] - 1:
                     break
 
-            batch_bar.close()
-            return results
+        batch_bar.close()
+        return results
 
     def _get_evaluation_recognition_configs(self, lm_model: Optional[DecoderOnlyTransformer] = None, lm_weight: float = 0.0) -> Dict[str, Dict[str, Any]]:
         """

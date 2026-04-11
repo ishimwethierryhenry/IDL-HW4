@@ -3,212 +3,235 @@ import os
 import numpy as np
 from tqdm import tqdm
 import torch
-from torch.utils.data import Dataset 
+from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 import torchaudio.transforms as tat
 from .tokenizer import H4Tokenizer
 
 '''
-TODO: Implement this class.
+ASRDataset for HW4P2.
 
-Specification:
-The ASRDataset class provides data loading and processing for ASR (Automatic Speech Recognition):
+Loads filterbank features and text transcripts from the LibriSpeech-style
+directory structure. Handles normalization, spec augmentation, and batching.
 
-1. Data Organization:
-   - Handles dataset partitions (train-clean-100, dev-clean, test-clean)
-   - Features stored as .npy files in fbank directory
-   - Transcripts stored as .npy files in text directory
-   - Maintains alignment between features and transcripts
+Data structure expected:
+    root/
+        train-clean-100/
+            fbank/    *.npy  (shape: num_feats x time, float32)
+            text/     *.npy  (shape: (), a Python string stored as numpy scalar)
+        dev-clean/
+            fbank/
+            text/
+        test-clean/
+            fbank/         (no text/ directory - we are generating transcriptions)
 
-2. Feature Processing:
-   - Loads log mel filterbank features from .npy files
-   - Supports multiple normalization strategies:
-     * global_mvn: Global mean and variance normalization
-     * cepstral: Per-utterance mean and variance normalization
-     * none: No normalization
-   - Applies SpecAugment data augmentation during training:
-     * Time masking: Masks random time steps
-     * Frequency masking: Masks random frequency bands
+Feature shape: the .npy files store features as (num_feats, time).
+We transpose to (num_feats, time) internally and then to (time, num_feats)
+in the collate_fn so the model sees (B, T, F) as expected by SpeechEmbedding.
 
-3. Transcript Processing:
-   - Similar to LMDataset transcript handling
-   - Creates shifted (SOS-prefixed) and golden (EOS-suffixed) versions
-   - Tracks statistics for perplexity calculation
-   - Handles tokenization using H4Tokenizer
-
-4. Batch Preparation:
-   - Pads features and transcripts to batch-uniform lengths
-   - Provides lengths for packed sequence processing
-   - Ensures proper device placement and tensor types
-
-Key Requirements:
-- Must maintain feature-transcript alignment
-- Must handle variable-length sequences
-- Must track maximum lengths for both features and text
-- Must implement proper padding for batching
-- Must apply SpecAugment only during training
-- Must support different normalization strategies
+IMPORTANT: The transcript .npy files store a numpy string scalar.
+Loading them requires: str(np.load(path, allow_pickle=True))
+The text is already uppercase (LibriSpeech convention).
 '''
+
 
 class ASRDataset(Dataset):
     def __init__(
             self,
-            partition:Literal['train-clean-100', 'dev-clean', 'test-clean'],
-            config:dict,
-            tokenizer:H4Tokenizer,
-            isTrainPartition:bool,
-            global_stats:Optional[Tuple[torch.Tensor, torch.Tensor]]=None
+            partition: Literal['train-clean-100', 'dev-clean', 'test-clean'],
+            config: dict,
+            tokenizer: H4Tokenizer,
+            isTrainPartition: bool,
+            global_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ):
-        """
-        Initialize the ASRDataset for ASR training/validation/testing.
+        '''
         Args:
-            partition (str): Dataset partition ('train-clean-100', 'dev-clean', or 'test-clean')
-            config (dict): Configuration dictionary containing dataset settings
-            tokenizer (H4Tokenizer): Tokenizer for encoding/decoding text
-            isTrainPartition (bool): Whether this is the training partition
-                                     Used to determine if SpecAugment should be applied.
-            global_stats (tuple, optional): (mean, std) computed from training set.
-                                          If None and using global_mvn, will compute during loading.
-                                          Should only be None for training set.
-                                          Should be provided for dev and test sets.
-        """
-        # TODO: Implement __init__
-        raise NotImplementedError # Remove once implemented
-    
-        # Store basic configuration
-        self.config    = config
-        self.partition = partition
+            partition        : which data split to load
+            config           : dict containing dataset settings:
+                               - root: path to hw4p2_data directory
+                               - num_feats: number of filterbank features to use (e.g. 80)
+                               - norm: 'global_mvn', 'cepstral', or 'none'
+                               - subset: fraction of data to load (1.0 = full dataset)
+                               - specaug: bool, whether to apply spec augment
+                               - specaug_conf: dict with spec augment parameters
+            tokenizer        : H4Tokenizer instance for encoding/decoding text
+            isTrainPartition : whether this is the training partition
+                               (controls whether spec augment is applied)
+            global_stats     : (mean, std) tensors of shape (num_feats,) for global_mvn
+                               Must be provided for dev/test when using global_mvn
+                               Should be None for training (computed during loading)
+        '''
+        # store basic configuration
+        self.config           = config
+        self.partition        = partition
         self.isTrainPartition = isTrainPartition
-        self.tokenizer = tokenizer
+        self.tokenizer        = tokenizer
 
-        # TODO: Get tokenizer ids for special tokens (eos, sos, pad)
-        self.eos_token = NotImplementedError
-        self.sos_token = NotImplementedError
-        self.pad_token = NotImplementedError
+        # get special token ids from tokenizer
+        # these are the ids we prepend/append to transcripts
+        self.eos_token = tokenizer.eos_id
+        self.sos_token = tokenizer.sos_id
+        self.pad_token = tokenizer.pad_id
 
-        # Set up data paths 
-        # TODO: Use root and partition to get the feature directory
-        self.fbank_dir   = NotImplementedError
-        
-        # TODO: Get all feature files in the feature directory in sorted order  
-        self.fbank_files = NotImplementedError
-        
-        # TODO: Take subset
-        subset_size      = NotImplementedError
-        self.fbank_files = NotImplementedError
-        
-        # TODO: Get the number of samples in the dataset  
-        self.length      = NotImplementedError
+        # build paths to the feature and text directories
+        # root is the path to hw4p2_data, partition is the subdirectory name
+        self.fbank_dir = os.path.join(config['root'], partition, 'fbank')
 
-        # Case on partition.
-        # Why will test-clean need to be handled differently?
-        if self.partition != "test-clean":
-            # TODO: Use root and partition to get the text directory
-            self.text_dir   = NotImplementedError
+        # get sorted list of all .npy feature files
+        # sorting is critical so that fbank files and text files align correctly
+        self.fbank_files = sorted([
+            os.path.join(self.fbank_dir, f)
+            for f in os.listdir(self.fbank_dir)
+            if f.endswith('.npy')
+        ])
 
-            # TODO: Get all text files in the text directory in sorted order  
-            self.text_files = NotImplementedError
-            
-            # TODO: Take subset
-            self.text_files = NotImplementedError
-            
-            # Verify data alignment
+        # optionally use a subset of the data (useful for debugging)
+        subset_size = config.get('subset', 1.0)
+        if subset_size < 1.0:
+            thierry_subset_count = max(1, int(len(self.fbank_files) * subset_size))
+            self.fbank_files = self.fbank_files[:thierry_subset_count]
+
+        # total number of samples in this partition
+        self.length = len(self.fbank_files)
+
+        # test-clean has no transcripts - we are generating predictions for it
+        # all other partitions (train and dev) have paired text files
+        if self.partition != 'test-clean':
+            self.text_dir = os.path.join(config['root'], partition, 'text')
+
+            self.text_files = sorted([
+                os.path.join(self.text_dir, f)
+                for f in os.listdir(self.text_dir)
+                if f.endswith('.npy')
+            ])
+
+            # apply same subset as features
+            if subset_size < 1.0:
+                self.text_files = self.text_files[:thierry_subset_count]
+
+            # sanity check - feature and text files must be aligned
             if len(self.fbank_files) != len(self.text_files):
-                raise ValueError("Number of feature and transcript files must match")
+                raise ValueError(
+                    f"Feature and transcript file count mismatch: "
+                    f"{len(self.fbank_files)} fbank vs {len(self.text_files)} text"
+                )
 
-        # Initialize lists to store features and transcripts
-        self.feats, self.transcripts_shifted, self.transcripts_golden = [], [], []
-        
-        # Initialize counters for character and token counts
-        # DO NOT MODIFY
+        # storage for loaded data
+        self.feats                = []
+        self.transcripts_shifted  = []
+        self.transcripts_golden   = []
+
+        # counters for character and token statistics
+        # DO NOT MODIFY - used by the trainer to compute perplexity
         self.total_chars  = 0
         self.total_tokens = 0
-        
-        # Initialize max length variables
+
+        # track max lengths for padding and sequence generator initialization
         # DO NOT MODIFY
         self.feat_max_len = 0
         self.text_max_len = 0
-        
-        # Initialize Welford's algorithm accumulators if needed for global_mvn
+
+        # Welford online mean/variance computation for global_mvn normalization
+        # this avoids loading everything twice - we compute stats during the loading loop
         # DO NOT MODIFY
         if self.config['norm'] == 'global_mvn' and global_stats is None:
             if not isTrainPartition:
-                raise ValueError("global_stats must be provided for non-training partitions when using global_mvn")
+                raise ValueError(
+                    "global_stats must be provided for non-training partitions "
+                    "when using global_mvn normalization"
+                )
             count = 0
-            mean = torch.zeros(self.config['num_feats'], dtype=torch.float64)
-            M2 = torch.zeros(self.config['num_feats'], dtype=torch.float64)
+            mean  = torch.zeros(self.config['num_feats'], dtype=torch.float64)
+            M2    = torch.zeros(self.config['num_feats'], dtype=torch.float64)
 
         print(f"Loading data for {partition} partition...")
         for i in tqdm(range(self.length)):
-            # TODO: Load features
-            # Features are of shape (num_feats, time)
-            feat = NotImplementedError
+            # load filterbank features
+            # stored as numpy array of shape (num_feats, time) - float32
+            handel_raw_feat = np.load(self.fbank_files[i])   # (num_feats_full, time)
 
-            # TODO: Truncate features to num_feats set by you in the config
-            feat = NotImplementedError
+            # truncate to the configured number of features
+            # this lets us use fewer than 80 features to save memory
+            feat = handel_raw_feat[:self.config['num_feats'], :]   # (num_feats, time)
 
-            # Append to self.feats (num_feats is set by you in the config)
+            # store as float32 tensor
+            feat = torch.FloatTensor(feat)
+
             self.feats.append(feat)
 
-            # Track max length (time dimension)
+            # track max time dimension (feat.shape[1] is the time axis)
             self.feat_max_len = max(self.feat_max_len, feat.shape[1])
 
-            # Update global statistics if needed (DO NOT MODIFY)
+            # update Welford accumulators for global mean/variance if needed
+            # DO NOT MODIFY
             if self.config['norm'] == 'global_mvn' and global_stats is None:
-                feat_tensor = torch.FloatTensor(feat)  # (num_feats, time)
-                batch_count = feat_tensor.shape[1]     # number of time steps
-                count += batch_count
-                
-                # Update mean and M2 for all time steps at once
-                delta = feat_tensor - mean.unsqueeze(1)  # (num_feats, time)
-                mean += delta.mean(dim=1)                # (num_feats,)
-                delta2 = feat_tensor - mean.unsqueeze(1) # (num_feats, time)
-                M2 += (delta * delta2).sum(dim=1)        # (num_feats,)
+                feat_tensor  = feat.double()          # (num_feats, time)
+                batch_count  = feat_tensor.shape[1]   # number of time steps
+                count       += batch_count
 
-            # NOTE: The following steps are almost the same as the steps in the LMDataset   
-            
-            if self.partition != "test-clean":
-                # TODO: Load the transcript
-                # Important Note: This is a very important line of code and you should check whether your transcript is correct after loading (and very dependent in evaluation)
-                transcript = NotImplementedError
+                delta  = feat_tensor - mean.unsqueeze(1)
+                mean  += delta.mean(dim=1)
+                delta2 = feat_tensor - mean.unsqueeze(1)
+                M2    += (delta * delta2).sum(dim=1)
 
-                # TODO: Track character count (before tokenization)
+            # load and process transcripts for train and dev partitions
+            if self.partition != 'test-clean':
+                # IMPORTANT: the transcript is stored as a numpy scalar containing a string
+                # we need allow_pickle=True and str() to correctly extract it
+                # The text is already uppercase in LibriSpeech
+                transcript = str(np.load(self.text_files[i], allow_pickle=True))
+
+                # count raw characters before tokenization
                 self.total_chars += len(transcript)
 
-                # TODO: Use tokenizer to encode the transcript (see tokenizer.encode for details)
-                tokenized = NotImplementedError
+                # tokenize the transcript into subword/character token ids
+                # tokenizer.encode returns a list of integer token ids
+                tokenized = tokenizer.encode(transcript)
 
-                # Track token count (excluding special tokens)
+                # count tokens (before adding SOS/EOS)
                 # DO NOT MODIFY
                 self.total_tokens += len(tokenized)
 
-                # Track max length (add 1 for the sos/eos tokens)
+                # track max token length (add 1 for the SOS or EOS we will add)
                 # DO NOT MODIFY
-                self.text_max_len = max(self.text_max_len, len(tokenized)+1)
-                
-                # TODO: Create shifted and golden versions by adding sos and eos tokens   
+                self.text_max_len = max(self.text_max_len, len(tokenized) + 1)
 
+                # create shifted version (model input): SOS prepended
+                # decoder receives: [SOS, t1, t2, ..., tN]
+                # and tries to predict: [t1, t2, ..., tN, EOS]
+                thierry_shifted = torch.LongTensor([self.sos_token] + tokenized)
 
-        # Calculate average characters per token
-        # DO NOT MODIFY 
-        self.avg_chars_per_token = self.total_chars / self.total_tokens if self.total_tokens > 0 else 0
-        
-        if self.partition != "test-clean":
-            # Verify data alignment
+                # create golden version (target): EOS appended
+                # this is what the decoder should output
+                thierry_golden  = torch.LongTensor(tokenized + [self.eos_token])
+
+                self.transcripts_shifted.append(thierry_shifted)
+                self.transcripts_golden.append(thierry_golden)
+
+        # average characters per token - used for character-level perplexity
+        # DO NOT MODIFY
+        self.avg_chars_per_token = (
+            self.total_chars / self.total_tokens if self.total_tokens > 0 else 0
+        )
+
+        # verify alignment after loading
+        if self.partition != 'test-clean':
             if not (len(self.feats) == len(self.transcripts_shifted) == len(self.transcripts_golden)):
-                raise ValueError("Features and transcripts are misaligned")
+                raise ValueError("Features and transcripts are misaligned after loading")
 
-        # Compute final global statistics if needed
+        # finalize global normalization statistics
         if self.config['norm'] == 'global_mvn':
             if global_stats is not None:
+                # use provided stats (for dev/test)
                 self.global_mean, self.global_std = global_stats
             else:
-                # Compute variance and standard deviation
-                variance = M2/(count - 1)
-                self.global_std = torch.sqrt(variance + 1e-8).float()
+                # compute from Welford accumulators (for training)
+                variance = M2 / (count - 1)
+                self.global_std  = torch.sqrt(variance + 1e-8).float()
                 self.global_mean = mean.float()
 
-        # Initialize SpecAugment transforms
+        # initialize SpecAugment transforms
+        # DO NOT MODIFY - uses torchaudio transforms
         self.time_mask = tat.TimeMasking(
             time_mask_param=config['specaug_conf']['time_mask_width_range'],
             iid_masks=True
@@ -220,112 +243,128 @@ class ASRDataset(Dataset):
 
     def get_avg_chars_per_token(self):
         '''
-        Get the average number of characters per token. Used to calculate character-level perplexity.
+        Return the average number of characters per token.
+        Used by the trainer to compute character-level perplexity.
         DO NOT MODIFY
         '''
         return self.avg_chars_per_token
 
     def __len__(self) -> int:
-        """
-        Return the number of samples in the dataset.
-        DO NOT MODIFY
-        """
-        # TODO: Implement __len__
-        raise NotImplementedError
+        '''Return the total number of samples in this partition.'''
+        return self.length
 
     def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Get a single sample from the dataset.
+        '''
+        Load a single sample and apply normalization.
 
         Args:
-            idx (int): Sample index
+            idx : sample index
 
         Returns:
-            tuple: (features, shifted_transcript, golden_transcript) where:
-                - features: FloatTensor of shape (num_feats, time)
-                - shifted_transcript: LongTensor (time) or None
-                - golden_transcript: LongTensor  (time) or None
-        """
-        # TODO: Load features
-        feat = NotImplementedError
-        raise NotImplementedError
+            feat                : (num_feats, time) FloatTensor - normalized features
+            shifted_transcript  : (T,) LongTensor or None (None for test-clean)
+            golden_transcript   : (T,) LongTensor or None (None for test-clean)
+        '''
+        # retrieve the pre-loaded feature tensor
+        feat = self.feats[idx]   # (num_feats, time)
 
-        # TODO: Apply normalization
+        # apply normalization
         if self.config['norm'] == 'global_mvn':
-            assert self.global_mean is not None and self.global_std is not None, "Global mean and std must be computed before normalization"
+            # global mean/variance normalization using training set statistics
+            # global_mean and global_std are both shape (num_feats,)
+            # we unsqueeze to broadcast over the time dimension
+            assert self.global_mean is not None and self.global_std is not None
             feat = (feat - self.global_mean.unsqueeze(1)) / (self.global_std.unsqueeze(1) + 1e-8)
+
         elif self.config['norm'] == 'cepstral':
+            # per-utterance mean and variance normalization (CMVN)
+            # normalize each feature dimension independently across time
             feat = (feat - feat.mean(dim=1, keepdim=True)) / (feat.std(dim=1, keepdim=True) + 1e-8)
+
         elif self.config['norm'] == 'none':
+            # no normalization
             pass
-        
-        # TODO: Get transcripts for non-test partitions
+
+        # get transcripts for non-test partitions
         shifted_transcript, golden_transcript = None, None
-        if self.partition != "test-clean":
-            # TODO: Get transcripts for non-test partitions
-            shifted_transcript = NotImplementedError
-            golden_transcript  = NotImplementedError
+        if self.partition != 'test-clean':
+            shifted_transcript = self.transcripts_shifted[idx]
+            golden_transcript  = self.transcripts_golden[idx]
 
-        raise NotImplementedError # Remove once implemented
+        return feat, shifted_transcript, golden_transcript
 
-    def collate_fn(self, batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Collate and pad a batch of samples to create a batch of fixed-length padded features and transcripts.
+    def collate_fn(
+        self,
+        batch
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        '''
+        Collate a list of samples into a padded batch.
+
+        The features are stored as (num_feats, time) but the model expects (B, T, F)
+        so we transpose each feature before padding. This is done by collecting
+        feat.T (transposed) so pad_sequence pads along the time dimension.
 
         Args:
-            batch (list): List of samples from __getitem__
+            batch : list of (feat, shifted, golden) tuples from __getitem__
 
         Returns:
-            tuple: (padded_features, padded_shifted, padded_golden, feat_lengths, transcript_lengths) where:
-                - padded_features: Tensor of shape (batch, max_time, num_feats)
-                - padded_shifted: Tensor of shape (batch, max_len) or None
-                - padded_golden: Tensor of shape (batch, max_len) or None  
-                - feat_lengths: Tensor of original feature lengths of shape (batch)
-                - transcript_lengths: Tensor of transcript lengths of shape (batch) or None
-        """
-        # TODO: Implement collate_fn
+            padded_feats        : (B, T_max, num_feats) - padded feature tensors
+            padded_shifted      : (B, T_text_max) or None
+            padded_golden       : (B, T_text_max) or None
+            feat_lengths        : (B,) - actual time lengths of each utterance
+            transcript_lengths  : (B,) - actual token lengths of each transcript (or None)
+        '''
+        # unzip the batch into separate lists
+        batch_feats_raw, batch_shifted_raw, batch_golden_raw = zip(*batch)
 
-        # TODO: Collect transposed features from the batch into a list of tensors (B x T x F)
-        batch_feats  = NotImplementedError
+        # transpose each feature from (num_feats, time) to (time, num_feats)
+        # so that pad_sequence pads along the time dimension correctly
+        # the model expects (B, T, F) not (B, F, T)
+        handel_feats_list = [f.T for f in batch_feats_raw]   # list of (time_i, num_feats)
 
-        # TODO: Collect feature lengths from the batch into a tensor
-        feat_lengths = NotImplementedError # B
+        # actual time lengths before padding
+        feat_lengths = torch.LongTensor([f.shape[0] for f in handel_feats_list])
 
-        # TODO: Pad features to create a batch of fixed-length padded features
-        padded_feats = NotImplementedError # B x T x F
+        # pad features to the longest utterance in the batch
+        # pad_sequence returns (T_max, B, num_feats), then permute to (B, T_max, num_feats)
+        padded_feats = pad_sequence(handel_feats_list, batch_first=True, padding_value=0.0)
+        # pad_sequence with batch_first=True already gives (B, T_max, num_feats)
 
-        # TODO: Handle transcripts for non-test partitions
+        # handle transcripts for non-test partitions
         padded_shifted, padded_golden, transcript_lengths = None, None, None
-        if self.partition != "test-clean":
-            # TODO: Collect shifted and golden transcripts from the batch into a list of tensors (B x T)  
-            batch_shifted      = NotImplementedError # B x T
-            batch_golden       = NotImplementedError # B x T
+        if self.partition != 'test-clean':
+            # actual transcript lengths (length of shifted = length of golden = len(tokenized) + 1)
+            transcript_lengths = torch.LongTensor([s.shape[0] for s in batch_shifted_raw])
 
-            # TODO: Collect transcript lengths from the batch into a tensor
-            transcript_lengths = NotImplementedError # B  
+            # pad shifted and golden transcripts
+            # pad_sequence with batch_first=True gives (B, T_text_max)
+            padded_shifted = pad_sequence(
+                list(batch_shifted_raw),
+                batch_first=True,
+                padding_value=self.pad_token
+            )
+            padded_golden = pad_sequence(
+                list(batch_golden_raw),
+                batch_first=True,
+                padding_value=self.pad_token
+            )
 
-            # TODO: Pad transcripts to create a batch of fixed-length padded transcripts
-            padded_shifted     = NotImplementedError # B x T
-            padded_golden      = NotImplementedError # B x T
+        # apply SpecAugment only during training
+        if self.config['specaug'] and self.isTrainPartition:
+            # SpecAugment expects (B, F, T) so we permute from (B, T, F)
+            padded_feats = padded_feats.permute(0, 2, 1)   # (B, num_feats, T_max)
 
-        # TODO: Apply SpecAugment for training
-        if self.config["specaug"] and self.isTrainPartition:
-            # TODO: Permute the features to (B x F x T)
-            padded_feats = NotImplementedError # B x F x T
+            # frequency masking: mask random frequency bands
+            if self.config['specaug_conf']['apply_freq_mask']:
+                for _ in range(self.config['specaug_conf']['num_freq_mask']):
+                    padded_feats = self.freq_mask(padded_feats)
 
-            # TODO: Apply frequency masking
-            if self.config["specaug_conf"]["apply_freq_mask"]:
-                for _ in range(self.config["specaug_conf"]["num_freq_mask"]):
-                    padded_feats = NotImplementedError
+            # time masking: mask random time steps
+            if self.config['specaug_conf']['apply_time_mask']:
+                for _ in range(self.config['specaug_conf']['num_time_mask']):
+                    padded_feats = self.time_mask(padded_feats)
 
-            # TODO: Apply time masking
-            if self.config["specaug_conf"]["apply_time_mask"]:
-                for _ in range(self.config["specaug_conf"]["num_time_mask"]):
-                    padded_feats = NotImplementedError
+            # permute back to (B, T, F) for the model
+            padded_feats = padded_feats.permute(0, 2, 1)   # (B, T_max, num_feats)
 
-            # TODO: Permute the features back to (B x T x F)
-            padded_feats = NotImplementedError # B x T x F
-
-        # TODO: Return the padded features, padded shifted, padded golden, feature lengths, and transcript lengths
-        raise NotImplementedError # Remove once implemented
-
+        return padded_feats, padded_shifted, padded_golden, feat_lengths, transcript_lengths
