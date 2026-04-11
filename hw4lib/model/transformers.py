@@ -123,8 +123,9 @@ class DecoderOnlyTransformer(nn.Module):
 
         # causal mask: True where attention should be blocked (upper triangle)
         # shape (T, T)
-        thierry_seq_len = padded_targets.size(1)
-        causal_mask = CausalMask(thierry_seq_len).to(padded_targets.device)
+        # thierry_seq_len = padded_targets.size(1)
+        # causal_mask = CausalMask(thierry_seq_len).to(padded_targets.device)
+        causal_mask = CausalMask(padded_targets).to(padded_targets.device)
 
         # embed tokens and add positional encoding
         # embedding: (B, T) -> (B, T, d_model)
@@ -400,8 +401,9 @@ class EncoderDecoderTransformer(nn.Module):
 
         # causal mask to prevent decoder from seeing future tokens
         # shape: (T_dec, T_dec), True in upper triangle = blocked
-        thierry_dec_len = padded_targets.size(1)
-        causal_mask = CausalMask(thierry_dec_len).to(padded_targets.device)
+        # thierry_dec_len = padded_targets.size(1)
+        # causal_mask = CausalMask(thierry_dec_len).to(padded_targets.device)
+        causal_mask = CausalMask(padded_targets).to(padded_targets.device)
 
         # embed tokens and optionally add positional encoding
         x_dec = self.target_embedding(padded_targets)  # (B, T_dec, d_model)
