@@ -84,7 +84,7 @@ class SelfAttentionLayer(nn.Module):
             value=x_normed,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=True
+            need_weights=False
         )
 
         # handel_weights shape depends on PyTorch version
@@ -159,7 +159,7 @@ class CrossAttentionLayer(nn.Module):
             value=y,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=True
+            need_weights=False
         )
 
         if henry_weights is not None and henry_weights.dim() == 4:
