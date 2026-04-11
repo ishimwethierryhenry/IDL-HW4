@@ -32,9 +32,6 @@ class SelfAttentionLayer(nn.Module):
 
     Attribute names are exactly: mha, norm, dropout
     The test suite checks these names directly so do not rename them.
-
-    average_attn_weights=True means the attention weights returned have shape
-    (B, T, T) averaged across heads, not (B, H, T, T). The tests expect (B, T, T).
     '''
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.0):
         '''
@@ -45,16 +42,13 @@ class SelfAttentionLayer(nn.Module):
         '''
         super().__init__()
 
-        # multi-head attention module - this does the actual QKV computation
+        # multi-head attention module
         # batch_first=True means input is (B, T, d_model) which is what we always use
-        # average_attn_weights=True gives us shape (B, T, T) instead of (B, H, T, T)
-        # this matters because the test suite checks the attention weight shape
         self.mha = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=num_heads,
-            dropout=0.0,       # attention-internal dropout, we handle outer dropout ourselves
-            batch_first=True,
-            average_attn_weights=True
+            dropout=0.0,
+            batch_first=True
         )
 
         # pre-norm layernorm - applied before the attention operation
@@ -79,25 +73,26 @@ class SelfAttentionLayer(nn.Module):
             x               : (B, T, d_model) - output after self-attention + residual
             attn_weights    : (B, T, T) - attention weights averaged across heads
         '''
-        # save for the residual connection
         thierry_residual = x
 
-        # normalize first (pre-LN), then attend
         x_normed = self.norm(x)
 
-        # self-attention: Q, K, V all come from the same sequence (x_normed)
-        # need_weights=True and average_attn_weights=True gives us (B, T, T) weights
+        # need_weights=True returns (B, H, T, T), we average over heads to get (B, T, T)
         handel_attn_out, handel_weights = self.mha(
             query=x_normed,
             key=x_normed,
             value=x_normed,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=True,
-            average_attn_weights=True
+            need_weights=True
         )
 
-        # apply dropout and add residual
+        # handel_weights shape depends on PyTorch version
+        # PyTorch >= 2.0 returns (B, T, T), PyTorch 1.13 returns (B, H, T, T)
+        # average over heads if needed
+        if handel_weights is not None and handel_weights.dim() == 4:
+            handel_weights = handel_weights.mean(dim=1)
+
         x = thierry_residual + self.dropout(handel_attn_out)
 
         return x, handel_weights
@@ -113,9 +108,6 @@ class CrossAttentionLayer(nn.Module):
       - Q comes from the decoder (x, the thing being generated)
       - K and V come from the encoder output (y, the speech representations)
 
-    This is how the decoder "looks at" the speech encoder states when deciding
-    what text token to generate next.
-
     Attribute names are exactly: mha, norm, dropout
     The test suite checks these names directly.
     '''
@@ -128,16 +120,13 @@ class CrossAttentionLayer(nn.Module):
         '''
         super().__init__()
 
-        # same setup as SelfAttentionLayer but will be used with Q != K/V
         self.mha = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=num_heads,
             dropout=0.0,
-            batch_first=True,
-            average_attn_weights=True
+            batch_first=True
         )
 
-        # pre-norm on the decoder query before cross-attending
         self.norm = nn.LayerNorm(d_model)
 
         self.dropout = nn.Dropout(dropout)
@@ -154,30 +143,28 @@ class CrossAttentionLayer(nn.Module):
             x                : (B, T_dec, d_model) - decoder hidden states (the query source)
             y                : (B, T_enc, d_model) - encoder hidden states (the key/value source)
             key_padding_mask : (B, T_enc) bool mask - True means "encoder position is padding"
-            attn_mask        : (T_dec, T_enc) or None - rarely used in cross-attention
+            attn_mask        : (T_dec, T_enc) or None
 
         Returns:
             x               : (B, T_dec, d_model) - output after cross-attention + residual
             attn_weights    : (B, T_dec, T_enc) - cross-attention weights
         '''
-        # residual comes from the decoder stream (x), not the encoder (y)
         ishimwe_residual = x
 
-        # normalize the decoder query before attending
         x_normed = self.norm(x)
 
-        # cross-attention: Q from decoder, K and V from encoder
         henry_attn_out, henry_weights = self.mha(
             query=x_normed,
             key=y,
             value=y,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=True,
-            average_attn_weights=True
+            need_weights=True
         )
 
-        # dropout on the attention output, then add the decoder residual back
+        if henry_weights is not None and henry_weights.dim() == 4:
+            henry_weights = henry_weights.mean(dim=1)
+
         x = ishimwe_residual + self.dropout(henry_attn_out)
 
         return x, henry_weights
@@ -207,19 +194,15 @@ class FeedForwardLayer(nn.Module):
         '''
         super().__init__()
 
-        # the whole feedforward block as a Sequential so weight keys match the
-        # expected pattern when loading pretrained decoder weights for P2
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_ff),   # expand
-            nn.GELU(),                   # activation (GELU not ReLU, important!)
-            nn.Dropout(dropout),         # inner dropout
-            nn.Linear(d_ff, d_model),   # contract back
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
         )
 
-        # pre-norm
         self.norm = nn.LayerNorm(d_model)
 
-        # residual dropout applied after the FFN output
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -232,7 +215,6 @@ class FeedForwardLayer(nn.Module):
         '''
         handel_residual = x
 
-        # normalize first, then run through the FFN
         x = handel_residual + self.dropout(self.ffn(self.norm(x)))
 
         return x
