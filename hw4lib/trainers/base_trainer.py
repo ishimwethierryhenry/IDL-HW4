@@ -151,7 +151,7 @@ class BaseTrainer(ABC):
                 # Write the summary string to file
                 f.write(str(model_summary))
             elif isinstance(self.model, EncoderDecoderTransformer):
-                batch_size = self.config['data'].get('batch_size', 8)
+                batch_size = 2
                 max_len = 1000
                 num_feats = self.config['data']['num_feats']
                 input_data = [
