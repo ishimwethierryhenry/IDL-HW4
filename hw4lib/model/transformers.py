@@ -352,7 +352,8 @@ class EncoderDecoderTransformer(nn.Module):
                 x=x_enc,
                 key_padding_mask=pad_mask_src
             )
-            running_att[f'layer{i+1}_enc_self'] = henry_enc_attn
+            if not self.training:
+                running_att[f'layer{i+1}_enc_self'] = henry_enc_attn
 
         # final encoder normalization
         x_enc = self.encoder_norm(x_enc)
@@ -424,8 +425,9 @@ class EncoderDecoderTransformer(nn.Module):
                 enc_key_padding_mask=pad_mask_src,
                 attn_mask=causal_mask
             )
-            running_att[f'layer{i+1}_dec_self']  = handel_self_attn
-            running_att[f'layer{i+1}_dec_cross'] = handel_cross_attn
+            if not self.training:
+                   running_att[f'layer{i+1}_dec_self']  = handel_self_attn
+                   running_att[f'layer{i+1}_dec_cross'] = handel_cross_attn
 
         # final decoder normalization and projection to vocabulary
         seq_out = self.final_linear(self.decoder_norm(x_dec))
