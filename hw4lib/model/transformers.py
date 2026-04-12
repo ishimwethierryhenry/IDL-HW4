@@ -308,7 +308,8 @@ class EncoderDecoderTransformer(nn.Module):
     def encode(
         self,
         padded_sources: torch.Tensor,
-        source_lengths: torch.Tensor
+        source_lengths: torch.Tensor,
+        collect_attention: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor, dict, dict]:
         '''
         Run the encoder on speech features.
@@ -350,9 +351,11 @@ class EncoderDecoderTransformer(nn.Module):
 
             x_enc, henry_enc_attn = self.enc_layers[i](
                 x=x_enc,
-                key_padding_mask=pad_mask_src
+                key_padding_mask=pad_mask_src,
+                need_weights=collect_attention
             )
-            running_att[f'layer{i+1}_enc_self'] = henry_enc_attn
+            if collect_attention:
+                running_att[f'layer{i+1}_enc_self'] = henry_enc_attn
 
         # final encoder normalization
         x_enc = self.encoder_norm(x_enc)
@@ -374,7 +377,8 @@ class EncoderDecoderTransformer(nn.Module):
         padded_targets: torch.Tensor,
         encoder_output: torch.Tensor,
         target_lengths: Optional[torch.Tensor] = None,
-        pad_mask_src: Optional[torch.Tensor] = None
+        pad_mask_src: Optional[torch.Tensor] = None,
+        collect_attention: bool = True
     ) -> Tuple[torch.Tensor, dict]:
         '''
         Run the decoder on token sequences conditioned on encoder output.
@@ -422,10 +426,12 @@ class EncoderDecoderTransformer(nn.Module):
                 enc_output=encoder_output,
                 dec_key_padding_mask=pad_mask_tgt,
                 enc_key_padding_mask=pad_mask_src,
-                attn_mask=causal_mask
+                attn_mask=causal_mask,
+                need_weights=collect_attention
             )
-            running_att[f'layer{i+1}_dec_self']  = handel_self_attn
-            running_att[f'layer{i+1}_dec_cross'] = handel_cross_attn
+            if collect_attention:
+                running_att[f'layer{i+1}_dec_self']  = handel_self_attn
+                running_att[f'layer{i+1}_dec_cross'] = handel_cross_attn
 
         # final decoder normalization and projection to vocabulary
         seq_out = self.final_linear(self.decoder_norm(x_dec))
@@ -437,7 +443,8 @@ class EncoderDecoderTransformer(nn.Module):
         padded_sources: torch.Tensor,
         padded_targets: torch.Tensor,
         source_lengths: Optional[torch.Tensor] = None,
-        target_lengths: Optional[torch.Tensor] = None
+        target_lengths: Optional[torch.Tensor] = None,
+        collect_attention: bool = True
     ) -> Tuple[torch.Tensor, dict, dict]:
         '''
         Full encoder-decoder forward pass. Used during training.
@@ -461,7 +468,8 @@ class EncoderDecoderTransformer(nn.Module):
         # encoder: speech -> hidden states
         encoder_output, pad_mask_src, enc_running_att, ctc_inputs = self.encode(
             padded_sources=padded_sources,
-            source_lengths=source_lengths
+            source_lengths=source_lengths,
+            collect_attention=collect_attention
         )
 
         # decoder: token ids + encoder hidden states -> vocabulary logits
@@ -469,7 +477,8 @@ class EncoderDecoderTransformer(nn.Module):
             padded_targets=padded_targets,
             encoder_output=encoder_output,
             target_lengths=target_lengths,
-            pad_mask_src=pad_mask_src
+            pad_mask_src=pad_mask_src,
+            collect_attention=collect_attention
         )
 
         # merge attention dicts from encoder and decoder

@@ -59,7 +59,8 @@ class SelfAttentionEncoderLayer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor] = None
+        key_padding_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         '''
         Args:
@@ -79,7 +80,8 @@ class SelfAttentionEncoderLayer(nn.Module):
         henry_enc_x, thierry_enc_weights = self.self_attn(
             x=x,
             key_padding_mask=key_padding_mask,
-            attn_mask=None   # no causal mask for encoder - bidirectional attention
+            attn_mask=None,   # no causal mask for encoder - bidirectional attention
+            need_weights=need_weights
         )
 
         # feedforward sublayer

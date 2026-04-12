@@ -136,7 +136,8 @@ class CrossAttentionDecoderLayer(nn.Module):
         enc_output: torch.Tensor,
         dec_key_padding_mask: Optional[torch.Tensor] = None,
         enc_key_padding_mask: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None
+        attn_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         '''
         Args:
@@ -158,7 +159,8 @@ class CrossAttentionDecoderLayer(nn.Module):
         ishimwe_x, ishimwe_self_weights = self.self_attn(
             x=x,
             key_padding_mask=dec_key_padding_mask,
-            attn_mask=attn_mask
+            attn_mask=attn_mask,
+            need_weights=need_weights
         )
 
         # step 2: cross-attention - decoder queries into encoder output
@@ -168,7 +170,8 @@ class CrossAttentionDecoderLayer(nn.Module):
             x=ishimwe_x,
             y=enc_output,
             key_padding_mask=enc_key_padding_mask,
-            attn_mask=None   # no causal constraint on cross-attention
+            attn_mask=None,   # no causal constraint on cross-attention
+            need_weights=need_weights
         )
 
         # step 3: feedforward

@@ -93,7 +93,7 @@ class ASRTrainer(BaseTrainer):
         running_ctc_loss = 0.0
         running_joint_loss = 0.0
         total_tokens = 0
-        running_att = None  # Initialize running_att here
+        running_att = {}
 
         # Only zero gradients when starting a new accumulation cycle
         self.optimizer.zero_grad()
@@ -114,12 +114,9 @@ class ASRTrainer(BaseTrainer):
                     padded_sources=feats,
                     padded_targets=targets_shifted,
                     source_lengths=feat_lengths,
-                    target_lengths=transcript_lengths
+                    target_lengths=transcript_lengths,
+                    collect_attention=False
                 )
-                
-                # Update running_att with the latest attention weights
-                if i == len(dataloader) - 1:
-                    running_att = {k: v.detach().cpu() for k, v in curr_att.items()}
                 
                 # CE loss: compare predictions to golden targets
                 # seq_out is (B, T, num_classes), need (B, num_classes, T) for CrossEntropyLoss

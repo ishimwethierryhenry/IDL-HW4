@@ -47,7 +47,7 @@ class SelfAttentionLayer(nn.Module):
         x: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-        need_weights: bool = False
+        need_weights: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         thierry_residual = x
@@ -59,7 +59,7 @@ class SelfAttentionLayer(nn.Module):
             value=x_normed,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=True   # MUST stay True for tests
+            need_weights=need_weights
         )
 
         if handel_weights is not None and handel_weights.dim() == 4:
@@ -100,7 +100,7 @@ class CrossAttentionLayer(nn.Module):
         y: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-        need_weights: bool = False
+        need_weights: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         ishimwe_residual = x
@@ -112,7 +112,7 @@ class CrossAttentionLayer(nn.Module):
             value=y,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=True   # MUST stay True for tests
+            need_weights=need_weights
         )
 
         if henry_weights is not None and henry_weights.dim() == 4:
