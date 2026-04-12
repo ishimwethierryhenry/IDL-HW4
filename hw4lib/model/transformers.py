@@ -352,8 +352,7 @@ class EncoderDecoderTransformer(nn.Module):
                 x=x_enc,
                 key_padding_mask=pad_mask_src
             )
-            if not self.training:
-                running_att[f'layer{i+1}_enc_self'] = henry_enc_attn
+            running_att[f'layer{i+1}_enc_self'] = henry_enc_attn
 
         # final encoder normalization
         x_enc = self.encoder_norm(x_enc)
