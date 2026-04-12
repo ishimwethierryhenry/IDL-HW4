@@ -57,7 +57,8 @@ class SelfAttentionLayer(nn.Module):
         self,
         x: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None
+        attn_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         '''
         Args:
@@ -79,14 +80,17 @@ class SelfAttentionLayer(nn.Module):
             value=x_normed,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=False
+            need_weights=need_weights
         )
 
         if handel_weights is not None and handel_weights.dim() == 4:
             handel_weights = handel_weights.mean(dim=1)
 
-        if self.training and handel_weights is not None:
-            handel_weights = handel_weights.detach()
+        if handel_weights is not None:
+           if self.training:
+            handel_weights = None   # 🚨 DROP COMPLETELY during training
+        else:
+           handel_weights = handel_weights.detach().cpu()  # safe for logging
 
         x = thierry_residual + self.dropout(handel_attn_out)
 
@@ -131,7 +135,8 @@ class CrossAttentionLayer(nn.Module):
         x: torch.Tensor,
         y: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None
+        attn_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         '''
         Args:
@@ -154,7 +159,7 @@ class CrossAttentionLayer(nn.Module):
             value=y,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=False
+            need_weights=need_weights
         )
 
         if henry_weights is not None and henry_weights.dim() == 4:
