@@ -118,7 +118,8 @@ class ASRTrainer(BaseTrainer):
                 )
                 
                 # Update running_att with the latest attention weights
-                running_att = curr_att
+                if i == len(dataloader) - 1:
+                    running_att = {k: v.detach().cpu() for k, v in curr_att.items()}
                 
                 # CE loss: compare predictions to golden targets
                 # seq_out is (B, T, num_classes), need (B, num_classes, T) for CrossEntropyLoss
