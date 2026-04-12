@@ -42,8 +42,6 @@ class SelfAttentionLayer(nn.Module):
         '''
         super().__init__()
 
-        # multi-head attention module
-        # batch_first=True means input is (B, T, d_model) which is what we always use
         self.mha = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=num_heads,
@@ -51,10 +49,8 @@ class SelfAttentionLayer(nn.Module):
             batch_first=True
         )
 
-        # pre-norm layernorm - applied before the attention operation
         self.norm = nn.LayerNorm(d_model)
 
-        # residual dropout - applied to the attention output before adding back the residual
         self.dropout = nn.Dropout(dropout)
 
     def forward(
@@ -77,21 +73,20 @@ class SelfAttentionLayer(nn.Module):
 
         x_normed = self.norm(x)
 
-        # need_weights=True returns (B, H, T, T), we average over heads to get (B, T, T)
         handel_attn_out, handel_weights = self.mha(
             query=x_normed,
             key=x_normed,
             value=x_normed,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=not self.training
+            need_weights=True
         )
 
-        # handel_weights shape depends on PyTorch version
-        # PyTorch >= 2.0 returns (B, T, T), PyTorch 1.13 returns (B, H, T, T)
-        # average over heads if needed
         if handel_weights is not None and handel_weights.dim() == 4:
             handel_weights = handel_weights.mean(dim=1)
+
+        if self.training and handel_weights is not None:
+            handel_weights = handel_weights.detach()
 
         x = thierry_residual + self.dropout(handel_attn_out)
 
@@ -159,11 +154,14 @@ class CrossAttentionLayer(nn.Module):
             value=y,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=not self.training
+            need_weights=True
         )
 
         if henry_weights is not None and henry_weights.dim() == 4:
             henry_weights = henry_weights.mean(dim=1)
+
+        if self.training and henry_weights is not None:
+            henry_weights = henry_weights.detach()
 
         x = ishimwe_residual + self.dropout(henry_attn_out)
 
