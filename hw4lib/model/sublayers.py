@@ -79,7 +79,7 @@ class SelfAttentionLayer(nn.Module):
             value=x_normed,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=not self.training
+            need_weights=True
         )
 
         if handel_weights is not None and handel_weights.dim() == 4:
@@ -154,7 +154,7 @@ class CrossAttentionLayer(nn.Module):
             value=y,
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
-            need_weights=not self.training
+            need_weights=True
         )
 
         if henry_weights is not None and henry_weights.dim() == 4:
