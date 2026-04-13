@@ -223,13 +223,18 @@ trainer = ASRTrainer(
     device=device
 )
 
-# load checkpoint if it exists in ocean
+# resume from ocean checkpoint if it exists
 ocean_ckpt = "/ocean/projects/cis250019p/thierryh/checkpoints/checkpoint-last-epoch-model.pth"
 if os.path.exists(ocean_ckpt):
-    print(f"Resuming from checkpoint: {ocean_ckpt}")
-    shutil.copy(ocean_ckpt, "expts/hw4p2-henry-cold-start/checkpoints/checkpoint-last-epoch-model.pth")
+    print(f"Resuming from ocean checkpoint...")
+    # create the local checkpoint directory first
+    local_ckpt_dir = "expts/hw4p2-henry-cold-start/checkpoints"
+    os.makedirs(local_ckpt_dir, exist_ok=True)
+    shutil.copy(ocean_ckpt, f"{local_ckpt_dir}/checkpoint-last-epoch-model.pth")
     trainer.load_checkpoint("checkpoint-last-epoch-model.pth")
     print(f"Resuming from epoch {trainer.current_epoch}")
+else:
+    print("No checkpoint found, starting from scratch.")
 
 trainer.optimizer = create_optimizer(
     model=model,
@@ -244,7 +249,7 @@ trainer.scheduler = create_scheduler(
 )
 
 print("Starting training...")
-trainer.train(train_loader, val_loader, epochs=20)
+trainer.train(train_loader, val_loader, epochs=30)
 
 # save checkpoints to ocean after training
 os.makedirs("/ocean/projects/cis250019p/thierryh/checkpoints", exist_ok=True)
