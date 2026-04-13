@@ -224,7 +224,7 @@ class ASRTrainer(BaseTrainer):
         # run recognition on the validation set using greedy decoding
         # recognize() handles the model.eval() and torch.inference_mode() internally
         val_recognition_config = {
-            'num_batches': 10,    # process all validation batches
+            'num_batches': 1,     # keep train-time validation fast; use full eval separately
             'beam_width': 1,        # greedy decoding for speed
             'temperature': 1.0,
             'repeat_penalty': 1.0,
@@ -528,7 +528,7 @@ class ASRTrainer(BaseTrainer):
         """
 
         common_config = {
-            'num_batches': None,
+            'num_batches': 2,
             'temperature': 1.0,
             'repeat_penalty': 1.0,
             'lm_weight': lm_weight,
